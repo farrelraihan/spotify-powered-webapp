@@ -35,11 +35,27 @@ class SpotifyAppApi
 
     public function audioFeatures(string $id): array
     {
-        return $this->http()->get("/audio-features/{$id}")->throw()->json();
+        $resp = $this->http()->get("/audio-features/{$id}");
+        if ($resp->successful()) return $resp->json();
+
+        if (in_array($resp->status(), [401, 403, 404])) {
+            // Endpoint may be gated for new apps – just return no features.
+            return [];
+        }
+
+    $resp->throw(); // other errors should still bubble up
     }
 
     public function recommendations(array $params): array
     {
-        return $this->http()->get('/recommendations', $params)->throw()->json();
+        $resp = $this->http()->get('/recommendations', $params);
+        if ($resp->successful()) return $resp->json();
+
+        if (in_array($resp->status(), [401, 403])) {
+            // Graceful fallback: no recs for now.
+            return ['tracks' => []];
+        }
+
+    $resp->throw();
     }
 }

@@ -20,7 +20,7 @@ class SongIngestService
         throw_unless($trackId, \InvalidArgumentException::class, 'Cannot parse Spotify track ID.');
 
         $meta = $this->spotify->track($trackId);
-        $feat = $this->spotify->audioFeatures($trackId);
+        $feat = $this->spotify->audioFeatures($trackId) ?: [];
 
         $song = Song::updateOrCreate(
             ['spotify_id' => $trackId],
@@ -43,6 +43,7 @@ class SongIngestService
                 'key'             => $feat['key'] ?? null,
                 'mode'            => $feat['mode'] ?? null,
                 'time_signature'  => $feat['time_signature'] ?? null,
+
                 'created_by'      => $userId,
             ]
         );
