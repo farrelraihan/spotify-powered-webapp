@@ -19,11 +19,15 @@ class PlaylistResource extends Resource
 
     protected static ?string $navigationIcon = 'heroicon-o-rectangle-stack';
 
+     protected static ?string $navigationLabel = 'Playlists';
+
     public static function form(Form $form): Form
     {
         return $form
             ->schema([
-                //
+                Forms\Components\TextInput::make('name')->required()->maxLength(255),
+                Forms\Components\Toggle::make('is_public')->label('Public'),
+                Forms\Components\Textarea::make('description')->rows(3),
             ]);
     }
 
@@ -31,7 +35,10 @@ class PlaylistResource extends Resource
     {
         return $table
             ->columns([
-                //
+                    Tables\Columns\TextColumn::make('name')->searchable()->sortable(),
+                    Tables\Columns\IconColumn::make('is_public')->boolean()->label('Public'),
+                    Tables\Columns\TextColumn::make('songs_count')->counts('songs')->label('# Songs'),
+                    Tables\Columns\TextColumn::make('created_at')->dateTime()->since()->label('Created'),
             ])
             ->filters([
                 //
@@ -49,7 +56,7 @@ class PlaylistResource extends Resource
     public static function getRelations(): array
     {
         return [
-            //
+            \App\Filament\Resources\PlaylistResource\RelationManagers\SongsRelationManager::class,
         ];
     }
 

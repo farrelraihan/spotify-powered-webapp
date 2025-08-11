@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Song extends Model
 {
@@ -15,10 +16,19 @@ class Song extends Model
 
     protected $casts = ['artists_json' => 'array'];
 
-    public function tags() { return $this->belongsToMany(Tag::class); }
+    public function tags() {
+        return $this->belongsToMany(Tag::class);
+    }
 
     public function getArtistsStringAttribute(): string
     {
         return collect($this->artists_json)->join(', ');
+    }
+
+    public function playlists(): BelongsToMany
+    {
+        return $this->belongsToMany(Playlist::class, 'playlist_song')
+            ->withPivot('position');
+            // ->orderBy('playlist_song.position');
     }
 }

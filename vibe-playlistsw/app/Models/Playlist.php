@@ -3,17 +3,18 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
-class Playlists extends Model
+class Playlist extends Model
 {
     protected $fillable = ['user_id','name','is_public','description','cover_url'];
 
     public function user() { return $this->belongsTo(User::class); }
 
-    public function songs()
+    public function songs(): BelongsToMany
     {
-        return $this->belongsToMany(Song::class)
+        return $this->belongsToMany(Song::class, 'playlist_song')
             ->withPivot('position')
-            ->orderBy('position');
+            ->orderBy('playlist_song.position');
     }
 }

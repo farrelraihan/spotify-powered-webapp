@@ -5,6 +5,7 @@ namespace App\Filament\Resources;
 use App\Filament\Resources\SongResource\Pages;
 use App\Filament\Resources\SongResource\RelationManagers;
 use App\Models\Song;
+use App\Models\Tag;
 use App\Services\SongIngestService;
 use App\Services\SpotifyAppApi;
 use Filament\Forms;
@@ -24,13 +25,48 @@ class SongResource extends Resource
 
     protected static ?string $navigationLabel = 'Songs';
 
-    // public static function form(Form $form): Form
-    // {
-    //     return $form
-    //         ->schema([
-    //             //
-    //         ]);
-    // }
+    public static function form(Form $form): Form
+    {
+        return $form
+            ->schema([
+                  Forms\Components\TextInput::make('name')
+                ->disabled()
+                ->dehydrated(false), // don’t overwrite
+            Forms\Components\TextInput::make('artists_string')
+                ->label('Artists')
+                ->disabled()
+                ->dehydrated(false),
+
+            Forms\Components\Grid::make(2)->schema([
+                Forms\Components\Select::make('moodTags')
+                    ->label('Mood')
+                    ->multiple()
+                    ->preload()
+                    ->options(fn () => Tag::query()
+                        ->where('type', 'mood')
+                        ->orderBy('name')
+                        ->pluck('name', 'id'))
+                    ->default(fn (?Song $record) => $record?->tags()
+                        ->where('type','mood')->pluck('tags.id')->all() ?? [])
+                    ->dehydrated(false),
+
+                Forms\Components\Select::make('activityTags')
+                    ->label('Activity')
+                    ->multiple()
+                    ->preload()
+                    ->options(fn () => Tag::query()
+                        ->where('type', 'activity')
+                        ->orderBy('name')
+                        ->pluck('name', 'id'))
+                    ->default(fn (?Song $record) => $record?->tags()
+                        ->where('type','activity')->pluck('tags.id')->all() ?? [])
+                ->dehydrated(false),
+            ]),
+
+            Forms\Components\TextInput::make('spotify_url')
+                ->label('Spotify URL')->disabled()->dehydrated(false),
+        ]);
+    }
 
     public static function table(Table $table): Table
     {
