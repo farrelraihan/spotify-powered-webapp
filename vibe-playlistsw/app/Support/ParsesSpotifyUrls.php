@@ -17,4 +17,12 @@ trait ParsesSpotifyUrls
 
         return null;
     }
+
+    public function parsePlaylistId(string $input): ?string
+    {
+        if (preg_match('~spotify:playlist:([A-Za-z0-9]+)~', $input, $m)) return $m[1];
+        if (preg_match('~open\.spotify\.com/playlist/([A-Za-z0-9]+)~', $input, $m)) return $m[1];
+        if (preg_match('~^[A-Za-z0-9]{10,}$~', $input)) return $input;
+        return null;
+    }
 }
