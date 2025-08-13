@@ -34,11 +34,28 @@ class PlaylistResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
+            ->poll('2s')
             ->columns([
                     Tables\Columns\TextColumn::make('name')->searchable()->sortable(),
                     Tables\Columns\IconColumn::make('is_public')->boolean()->label('Public'),
                     Tables\Columns\TextColumn::make('songs_count')->counts('songs')->label('# Songs'),
                     Tables\Columns\TextColumn::make('created_at')->dateTime()->since()->label('Created'),
+                    Tables\Columns\TextColumn::make('import_status')
+                    ->label('Import')
+                    ->badge()
+                    ->color(fn ($state) => match ($state) {
+                        'running' => 'warning',
+                        'queued'  => 'gray',
+                        'done'    => 'success',
+                        'failed'  => 'danger',
+                        default   => 'gray',
+                    }),
+                    Tables\Columns\TextColumn::make('import_done')
+                        ->label('Done')
+                        ->formatStateUsing(fn ($state, $record) =>
+                            $record->import_total ? "{$state} / {$record->import_total}" : ($state ?: '—')
+                        )
+
             ])
             ->filters([
                 //

@@ -34,7 +34,7 @@ class SpotifyAppApi
     {
         $resp = $this->http()->get("/tracks/{$id}");
         if ($resp->successful()) return $resp->json();
-        if (in_array($resp->status(), [401,403,404])) return [];
+        if (in_array($resp->status(), [400,401,403,404])) return [];
         $resp->throw();
     }
 
@@ -57,10 +57,10 @@ class SpotifyAppApi
         $resp = $this->http()->get('/recommendations', $params);
         if ($resp->successful()) return $resp->json();
 
-        if (in_array($resp->status(), [401, 403])) {
+        // Many apps get 400/403/404 here with client-credentials — just degrade gracefully.
+        if (in_array($resp->status(), [400, 401, 403, 404])) {
             return ['tracks' => []];
         }
-
         $resp->throw();
     }
 

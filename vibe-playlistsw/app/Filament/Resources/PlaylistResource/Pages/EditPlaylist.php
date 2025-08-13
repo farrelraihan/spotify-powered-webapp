@@ -16,4 +16,11 @@ class EditPlaylist extends EditRecord
             Actions\DeleteAction::make(),
         ];
     }
+
+    protected function getHeaderWidgets(): array
+    {
+        return [
+            \App\Filament\Resources\PlaylistResource\Widgets\PlaylistImportProgress::class,
+        ];
+    }
 }

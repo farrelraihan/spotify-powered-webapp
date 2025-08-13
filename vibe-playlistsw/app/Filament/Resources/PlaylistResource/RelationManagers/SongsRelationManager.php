@@ -41,66 +41,57 @@ class SongsRelationManager extends RelationManager
             ->headerActions([
                 Tables\Actions\AttachAction::make()->preloadRecordSelect(),
 
-                Tables\Actions\Action::make('importSpotify')
-                    ->label('Import from Spotify Playlist')
-                    ->icon('heroicon-o-cloud-arrow-down')
-                    ->form([
-                        Forms\Components\TextInput::make('url')
-                            ->placeholder('https://open.spotify.com/playlist/...')
-                            ->required(),
-                        Forms\Components\Toggle::make('clearFirst')
-                            ->label('Clear existing before import')
-                            ->default(false),
-                        Forms\Components\TextInput::make('max')
-                            ->numeric()->minValue(1)->maxValue(1000)->default(200)
-                            ->label('Max tracks to import'),
-                    ])
-                    ->action(function (array $data) {
-                        /** @var \App\Models\Playlist $playlist */
-                        $playlist = $this->getOwnerRecord();
+            Tables\Actions\Action::make('importSpotify')
+                ->label('Import from Spotify Playlist')
+                ->icon('heroicon-o-cloud-arrow-down')
+                ->form([
+                    Forms\Components\TextInput::make('url')
+                        ->placeholder('https://open.spotify.com/playlist/... or spotify:playlist:...')
+                        ->required(),
+                    Forms\Components\Toggle::make('clearFirst')
+                        ->label('Clear existing before import')->default(false),
+                    Forms\Components\TextInput::make('max')
+                        ->numeric()->minValue(1)->maxValue(1000)->default(200)
+                        ->label('Max tracks to import'),
+                ])
+                ->action(function (array $data) {
+                    /** @var \App\Models\Playlist $playlist */
+                    $playlist = $this->getOwnerRecord();
 
-                         @set_time_limit(180);
+                    // Parse the playlist ID from URL or URI
+                    $url = trim($data['url']);
+                    $id = null;
+                    if (preg_match('~playlist/([a-zA-Z0-9]+)~', $url, $m)) $id = $m[1];
+                    if (!$id && preg_match('~spotify:playlist:([a-zA-Z0-9]+)~', $url, $m)) $id = $m[1];
 
-                        $id = $this->parsePlaylistId($data['url']);
-                        if (! $id) {
-                            Notification::make()->title('Could not parse playlist URL')->warning()->send();
-                            return;
-                        }
-
-                        $api = app(SpotifyAppApi::class);
-                        $trackIds = $api->playlistTracksAll($id, (int) $data['max']);
-
-                        if (empty($trackIds)) {
-                            Notification::make()
-                                ->title('Spotify did not return tracks (playlist endpoint may be gated).')
-                                ->warning()->send();
-                            return;
-                        }
-
-                        $svc = app(SongIngestService::class);
-
-                        if (!empty($data['clearFirst'])) {
-                            $playlist->songs()->detach();
-                        }
-
-                        $pos = (int) ($playlist->songs()->max('playlist_song.position') ?? 0);
-                        $added = 0;
-
-                       // ✅ Chunk the import to keep each loop fast
-                    foreach (array_chunk($trackIds, 25) as $chunk) { // try 25 - 40
-                        $ingested = $svc->ingestMany($chunk, auth()->id()); // batch ingest
-                        // Attach in the same order:
-                        foreach ($chunk as $tid) {
-                            $song = \App\Models\Song::where('spotify_id', $tid)->first();
-                            if ($song) {
-                                $playlist->songs()->syncWithoutDetaching([$song->id => ['position' => ++$pos]]);
-                                $added++;
-                            }
-                        }
+                    if (!$id) {
+                        \Filament\Notifications\Notification::make()
+                            ->title('Could not parse playlist URL')
+                            ->warning()->send();
+                        return;
                     }
 
-                        Notification::make()->title("Imported {$added} track(s).")->success()->send();
-                    }),
+                    // Mark as queued & dispatch
+                    $playlist->update([
+                        'import_status' => 'queued',
+                        'import_total'  => null,
+                        'import_done'   => 0,
+                    ]);
+
+                    \App\Jobs\ImportSpotifyPlaylistJob::dispatch(
+                        playlistId: $playlist->id,
+                        spotifyPlaylistId: $id,
+                        max: (int) ($data['max'] ?? 200),
+                        clearFirst: (bool) ($data['clearFirst'] ?? false),
+                        userId: auth()->id() ?? 0,
+                    );
+
+                    \Filament\Notifications\Notification::make()
+                        ->title('Import started')
+                        ->body('You can leave this page. Progress will update automatically.')
+                        ->success()->send();
+                }),
+
             ])
             ->actions([
                 Tables\Actions\Action::make('setPosition')

@@ -137,48 +137,160 @@ class SongResource extends Resource
                 Tables\Actions\Action::make('recommend')
                     ->label('Recommend')
                     ->icon('heroicon-o-sparkles')
-                    ->modalHeading('Recommendations')
-                    ->modalSubmitAction(false)            // no Submit button
+                    ->modalHeading('Recommendations (compact)')
+                    ->modalSubmitAction(false)
                     ->modalCancelActionLabel('Close')
-                    ->modalContent(function (Song $r) {
-                        $api = app(\App\Services\SpotifyAppApi::class);
+                    ->modalContent(function (\App\Models\Song $r) {
+                        $api    = app(\App\Services\SpotifyAppApi::class);
+                        $TARGET = 10;
 
-                        // Try Spotify recommendations
+                        // helpers
+                        $uniqByTrackId = function (array $tracks): array {
+                            $seen = []; $out = [];
+                            foreach ($tracks as $t) {
+                                $id = $t['id'] ?? ($t['uri'] ?? null);
+                                if (!$id || isset($seen[$id])) continue;
+                                $seen[$id] = true;
+                                $out[] = $t;
+                            }
+                            return $out;
+                        };
+                        $capPerArtist = function (array $tracks, int $cap = 2): array {
+                            $count = []; $out = [];
+                            foreach ($tracks as $t) {
+                                $aid = $t['artists'][0]['id'] ?? ($t['artists'][0]['name'] ?? 'unknown');
+                                if (($count[$aid] ?? 0) >= $cap) continue;
+                                $count[$aid] = ($count[$aid] ?? 0) + 1;
+                                $out[] = $t;
+                            }
+                            return $out;
+                        };
+
+                        // seed
+                        $seedMeta       = $api->track($r->spotify_id);
+                        $seedArtistId   = $seedMeta['artists'][0]['id']   ?? null;
+                        $seedArtistName = $seedMeta['artists'][0]['name'] ?? ($r->artists_json[0] ?? null);
+
+                        $pool = [];
+
+                        // 1) /recommendations
                         $recs = $api->recommendations([
                             'seed_tracks'    => $r->spotify_id,
-                            'limit'          => 10,
+                            'limit'          => 20,
                             'target_valence' => $r->valence,
                             'target_energy'  => $r->energy,
                         ]);
-                        $tracks = $recs['tracks'] ?? [];
+                        if (!empty($recs['tracks'])) $pool = array_merge($pool, $recs['tracks']);
 
-                        // Fallback 1: artist's top tracks (multi-market)
-                        if (empty($tracks)) {
-                            $meta = $api->track($r->spotify_id);   // may return [] if 404
-                            $artistId = $meta['artists'][0]['id'] ?? null;
+                        // 2) related artists -> top tracks
+                        if ($seedArtistId && count($pool) < $TARGET) {
+                            $rel = $api->relatedArtists($seedArtistId);
+                            foreach (array_slice($rel['artists'] ?? [], 0, 8) as $a) {
+                                $rid = $a['id'] ?? null;
+                                if (!$rid || $rid === $seedArtistId) continue;
+                                $top = $api->artistTopTracks($rid, 'US');
+                                foreach (array_slice($top['tracks'] ?? [], 0, 2) as $t) $pool[] = $t;
+                                if (count($pool) >= $TARGET * 2) break;
+                            }
+                        }
 
-                            if ($artistId) {
-                                foreach (['US','GB','JP','DE','ID'] as $m) {
-                                    $top = $api->artistTopTracks($artistId, $m);
-                                    if (!empty($top['tracks'])) { $tracks = $top['tracks']; break; }
+                        // 3) sprinkle seed artist
+                        if ($seedArtistId && count($pool) < $TARGET) {
+                            foreach (['US','GB','JP','DE','ID'] as $m) {
+                                $top = $api->artistTopTracks($seedArtistId, $m);
+                                if (!empty($top['tracks'])) {
+                                    foreach ($top['tracks'] as $t) $pool[] = $t;
+                                    if (count($pool) >= $TARGET * 2) break;
                                 }
                             }
                         }
 
-                        // Fallback 2: related artists' top tracks
-                        if (empty($tracks ?? []) && !empty($artistId ?? null)) {
-                            $rel = $api->relatedArtists($artistId);
-                            foreach (array_slice($rel['artists'] ?? [], 0, 3) as $a) {
-                                $top = $api->artistTopTracks($a['id'], 'US');
-                                foreach (array_slice($top['tracks'] ?? [], 0, 3) as $t) {
-                                    $tracks[] = $t;
-                                    if (count($tracks) >= 10) break 2;
-                                }
+                        // dedupe + cap
+                        $pool = $uniqByTrackId($pool);
+                        $pool = $capPerArtist($pool, 2);
+
+                        // 4) fill from local library (exclude same primary artist by JSON)
+                        if (count($pool) < $TARGET) {
+                            $tagIds  = $r->tags()->pluck('tags.id');
+                            $primary = $seedArtistName;
+
+                            $local = \App\Models\Song::query()
+                                ->whereKeyNot($r->id)
+                                ->when($primary, fn ($q) =>
+                                    $q->whereRaw('JSON_SEARCH(artists_json, "one", ?) IS NULL', [$primary])
+                                )
+                                ->whereHas('tags', fn ($q) => $q->whereIn('tags.id', $tagIds))
+                                ->withCount(['tags as overlap_count' => fn ($q) => $q->whereIn('tags.id', $tagIds)])
+                                ->orderByDesc('overlap_count')
+                                ->inRandomOrder()
+                                ->limit($TARGET * 2)
+                                ->get();
+
+                            foreach ($local as $s) {
+                                $pool[] = [
+                                    'id'    => $s->spotify_id,
+                                    'name'  => $s->name,
+                                    'artists' => collect($s->artists_json ?? [])->map(fn ($n) => ['name' => $n])->all(),
+                                    'album'   => ['images' => [['url' => $s->cover_url]]],
+                                    'external_urls' => ['spotify' => $s->spotify_url],
+                                    'preview_url'   => $s->preview_url,
+                                ];
                             }
                         }
 
-                        return view('filament.songs.recs', ['tracks' => $tracks]);
-                    }),
+                        // normalize minimal fields we’ll render
+                        $tracks = collect($pool)
+                            ->filter(fn ($t) => is_array($t) && !empty($t['name']) && !empty($t['artists']))
+                            ->map(function ($t) {
+                                $imgs = data_get($t, 'album.images', []);
+                                $img  = $imgs[1]['url'] ?? ($imgs[0]['url'] ?? '');
+                                return [
+                                    'title'   => $t['name'] ?? '—',
+                                    'artist'  => collect($t['artists'])->pluck('name')->filter()->join(', ') ?: 'Unknown artist',
+                                    'img'     => $img,
+                                    'open'    => data_get($t, 'external_urls.spotify', '#'),
+                                ];
+                            })
+                            ->take($TARGET)
+                            ->values()
+                            ->all();
+
+                        // compact 2-col grid with hard inline sizes (nothing can override)
+                        $css = '<style>
+                        .rec-grid{display:grid;grid-template-columns:1fr;gap:10px}
+                        @media(min-width:768px){.rec-grid{grid-template-columns:1fr 1fr}}
+                        .rec-item{display:flex;align-items:center;gap:12px;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.05)}
+                        .rec-thumb{width:56px;height:56px;border-radius:8px;object-fit:cover;flex:0 0 56px}
+                        .rec-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+                        .rec-artist{font-size:12px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+                        .rec-open{margin-left:auto;padding:6px 10px;border-radius:8px;background:#22c55e;color:#fff;text-decoration:none;font-size:12px}
+                        .rec-open:hover{background:#16a34a}
+                        </style>';
+
+                        $html = $css . '<div class="rec-grid">';
+                        foreach ($tracks as $t) {
+                            $img = $t['img']
+                                ? '<img class="rec-thumb" src="'.$t['img'].'" loading="lazy" />'
+                                : '<div class="rec-thumb" style="background:rgba(255,255,255,.1)"></div>';
+                            $html .= '<div class="rec-item">
+                                '.$img.'
+                                <div style="min-width:0">
+                                    <div class="rec-title">'.$t['title'].'</div>
+                                    <div class="rec-artist">'.$t['artist'].'</div>
+                                </div>
+                                <a class="rec-open" target="_blank" href="'.$t['open'].'">Open</a>
+                            </div>';
+                        }
+                        if (!$tracks) $html .= '<div class="rec-artist">No recs right now.</div>';
+                        $html .= '</div>';
+
+                        return new \Illuminate\Support\HtmlString($html);
+                    })
+
+
+
+
+
 
             ])
             ->bulkActions([

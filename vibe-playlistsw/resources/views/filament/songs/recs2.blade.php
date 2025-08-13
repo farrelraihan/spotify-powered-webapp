@@ -1,16 +1,17 @@
+{{-- resources/views/filament/songs/recs2.blade.php --}}
 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
   @forelse($tracks as $t)
     @php
       $img = data_get($t, 'album.images.1.url')
           ?? data_get($t, 'album.images.0.url')
           ?? '';
-      $title = $t['name'] ?? '—';
+      $title   = $t['name'] ?? '—';
       $artists = collect($t['artists'] ?? [])->pluck('name')->filter()->join(', ');
-      $open = data_get($t, 'external_urls.spotify', '#');
+      $open    = data_get($t, 'external_urls.spotify', '#');
       $preview = $t['preview_url'] ?? null;
     @endphp
 
-    <div class="p-3 border rounded-xl flex gap-3 items-start bg-white/5">
+    <div class="p-3 border border-white/10 rounded-xl flex gap-3 items-start bg-white/5">
       @if($img)
         <img src="{{ $img }}" alt="" class="w-12 h-12 rounded object-cover flex-shrink-0" loading="lazy">
       @else

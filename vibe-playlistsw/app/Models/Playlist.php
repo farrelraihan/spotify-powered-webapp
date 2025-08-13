@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Playlist extends Model
 {
-    protected $fillable = ['user_id','name','is_public','description','cover_url'];
+    protected $fillable = ['user_id','name','is_public','description','cover_url','import_total','import_done','import_status'];
 
     public function user() { return $this->belongsTo(User::class); }
 
