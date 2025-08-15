@@ -1,0 +1,82 @@
+name: Deploy via SSH (Hostinger split app/public)
+
+on:
+  push:
+    branches: [ main ]  # change to "master" if that's your branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # PHP deps
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer
+
+      - name: Install Composer deps
+        run: composer install --no-dev --prefer-dist --optimize-autoloader
+
+      # Frontend build
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: Build assets
+        run: npm run build
+
+      # Swap in the Hostinger index (loads from ../app)
+      - name: Prepare Hostinger index.php
+        run: cp public/index.hostinger.php public/index.php
+
+      # Make two tarballs: app (everything except /public) and public (only /public)
+      - name: Create bundles
+        run: |
+          tar -czf deploy_app.tgz \
+            --exclude=public \
+            --exclude=.git \
+            --exclude=tests \
+            --exclude=.github \
+            --exclude=node_modules \
+            .
+          tar -czf deploy_public.tgz -C public .
+
+      # Upload tarballs to server ~/deploy
+      - name: Upload bundles via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          source: |
+            deploy_app.tgz
+            deploy_public.tgz
+          target: ~/deploy
+
+      # Unpack on server and optimize
+      - name: Unpack & optimize on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -e
+            mkdir -p ${{ secrets.APP_PATH }} ${{ secrets.PUBLIC_PATH }} ~/deploy
+            tar -xzf ~/deploy/deploy_app.tgz -C ${{ secrets.APP_PATH }}
+            tar -xzf ~/deploy/deploy_public.tgz -C ${{ secrets.PUBLIC_PATH }}
+            chmod -R 775 ${{ secrets.APP_PATH }}/storage ${{ secrets.APP_PATH }}/bootstrap/cache || true
+            php ${{ secrets.APP_PATH }}/artisan config:cache
+            php ${{ secrets.APP_PATH }}/artisan route:cache
+            php ${{ secrets.APP_PATH }}/artisan view:cache
