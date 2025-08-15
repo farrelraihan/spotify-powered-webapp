@@ -110,7 +110,7 @@ jobs:
           fi
 
       # Step 11: Execute the deployment script on the remote server.
-      # This script unpacks the bundles, installs dependencies, and runs Artisan commands.
+      # This script unpacks bundles, finds PHP 8.3, installs dependencies, and runs Artisan commands.
       - name: Deploy on server (composer + artisan + publish public)
         run: |
           ssh -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
@@ -118,6 +118,17 @@ jobs:
           set -e
           : "${APP_PATH:?APP_PATH not set}"
           : "${PUBLIC_PATH:?PUBLIC_PATH not set}"
+
+          # --- pick PHP 8.3 for CLI ---
+          if [ -x /opt/alt/php83/usr/bin/php ]; then
+            PHP_BIN=/opt/alt/php83/usr/bin/php
+          elif command -v php83 >/dev/null 2>&1; then
+            PHP_BIN="$(command -v php83)"
+          else
+            PHP_BIN="$(command -v php)"
+          fi
+          echo "Using PHP: $PHP_BIN"
+          "$PHP_BIN" -v
 
           mkdir -p "$APP_PATH" "$PUBLIC_PATH" "$PUBLIC_PATH/build"
 
@@ -131,25 +142,23 @@ jobs:
 
           cd "$APP_PATH"
 
-          # Always use Composer v2 locally (don’t rely on system composer)
-          php -v
-          php -r "copy('https://getcomposer.org/installer','composer-setup.php');"
-          php composer-setup.php --2 --filename=composer.phar
-          php composer.phar --version
+          # Always use Composer 2 locally (don’t rely on system composer)
+          "$PHP_BIN" -r "copy('https://getcomposer.org/installer','composer-setup.php');"
+          "$PHP_BIN" composer-setup.php --2 --filename=composer.phar
+          "$PHP_BIN" composer.phar --version
 
-          php composer.phar install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+          # Install with the selected PHP version
+          "$PHP_BIN" composer.phar install --no-dev --prefer-dist --optimize-autoloader --no-interaction
 
-          # Bootstrap .env if missing
-          if [ ! -f ".env" ]; then cp -f .env.example .env || true; fi
-
-          # Generate an app key if it's missing.
+          # Bootstrap env if needed
+          [ -f .env ] || cp -f .env.example .env || true
           if ! grep -q "^APP_KEY=" .env || [ -z "$(grep '^APP_KEY=' .env | cut -d= -f2)" ]; then
-            php artisan key:generate --force || true
+            "$PHP_BIN" artisan key:generate --force || true
           fi
 
-          # Run standard Laravel deployment commands.
-          php artisan storage:link    || true
-          php artisan migrate --force || true
-          php artisan optimize:clear  || true
-          php artisan optimize        || true
+          # Run standard Laravel deployment commands with the selected PHP version
+          "$PHP_BIN" artisan storage:link    || true
+          "$PHP_BIN" artisan migrate --force || true
+          "$PHP_BIN" artisan optimize:clear  || true
+          "$PHP_BIN" artisan optimize        || true
           EOSSH
