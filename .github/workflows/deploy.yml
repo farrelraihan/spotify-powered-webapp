@@ -10,29 +10,37 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      SSH_HOST:      ${{ secrets.SSH_HOST }}
-      SSH_PORT:      ${{ secrets.SSH_PORT }}
-      SSH_USER:      ${{ secrets.SSH_USER }}
-      APP_PATH:      ${{ secrets.APP_PATH }}
-      PUBLIC_PATH:   ${{ secrets.PUBLIC_PATH }}
+      SSH_HOST:    ${{ secrets.SSH_HOST }}
+      SSH_PORT:    ${{ secrets.SSH_PORT }}
+      SSH_USER:    ${{ secrets.SSH_USER }}
+      APP_PATH:    ${{ secrets.APP_PATH }}
+      PUBLIC_PATH: ${{ secrets.PUBLIC_PATH }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---- Build frontend (Vite) ----
+      # ---------- Frontend build (safe with/without lockfile) ----------
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Node deps
+      - name: Install Node deps (lockfile)
+        if: hashFiles('package-lock.json', 'npm-shrinkwrap.json') != ''
         run: npm ci
 
-      - name: Build assets (Vite)
-        run: npm run build
+      - name: Install Node deps (no lockfile)
+        if: hashFiles('package-lock.json', 'npm-shrinkwrap.json') == ''
+        run: npm install --no-audit --no-fund --legacy-peer-deps
 
-      # ---- SSH prep (decode base64 key + known_hosts) ----
+      - name: Build assets (Vite)
+        if: hashFiles('package.json') != ''
+        run: |
+          # If your build script is named differently, adjust here:
+          npm run build
+
+      # ---------- SSH prep ----------
       - name: Prepare SSH
         run: |
           mkdir -p ~/.ssh
@@ -40,13 +48,12 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "${SSH_PORT}" -t ed25519 "${SSH_HOST}" >> ~/.ssh/known_hosts
 
-      # ---- Stage then tar (avoids "file changed as we read it") ----
+      # ---------- Stage then tar (prevents "file changed as we read it") ----------
       - name: Stage files
         run: |
           rm -rf _stage_app _stage_pub _app _pub
           mkdir -p _stage_app _stage_pub _app _pub
 
-          # Copy the app (exclude heavy/runtime dirs)
           rsync -a . _stage_app \
             --exclude .git \
             --exclude node_modules \
@@ -54,7 +61,7 @@ jobs:
             --exclude public/build \
             --exclude storage
 
-          # Copy only built assets into public staging
+          # Move built assets into staging if they exist
           if [ -d public/build ]; then
             rsync -a public/build/ _stage_pub/build/
           fi
@@ -67,23 +74,21 @@ jobs:
           if [ -d _stage_pub/build ]; then
             tar -C _stage_pub -czf _pub/public.tar.gz build
           else
-            # make an empty tar so later steps don't fail
+            # Create empty tar so later steps always succeed
             tar -czf _pub/public.tar.gz --files-from /dev/null
           fi
 
-      # ---- Upload to server home ----
+      # ---------- Upload bundles ----------
       - name: Upload bundles to server
         run: |
           scp -P "${SSH_PORT}" _app/app.tar.gz _pub/public.tar.gz \
             "${SSH_USER}@${SSH_HOST}:~/"
-          # optional: Hostinger front controller
           if [ -f index.hostinger.php ]; then
-            scp -P "${SSH_PORT}" index.hostinger.php \
-              "${SSH_USER}@${SSH_HOST}:~/index.hostinger.php"
+            scp -P "${SSH_PORT}" index.hostinger.php "${SSH_USER}@${SSH_HOST}:~/index.hostinger.php"
           fi
 
-      # ---- Remote deploy (composer + artisan + publish public/build) ----
-      - name: Deploy on server
+      # ---------- Remote deploy (composer + artisan + publish build) ----------
+      - name: Deploy on server (composer + artisan + publish public)
         run: |
           ssh -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
             "APP_PATH='${APP_PATH}' PUBLIC_PATH='${PUBLIC_PATH}' bash -s" <<'EOSSH'
@@ -94,18 +99,15 @@ jobs:
 
           mkdir -p "$APP_PATH" "$PUBLIC_PATH" "$PUBLIC_PATH/build"
 
-          # Extract uploads
-          [ -f "$HOME/app.tar.gz" ]    && tar -xzf "$HOME/app.tar.gz" -C "$APP_PATH"    && rm -f "$HOME/app.tar.gz"
+          [ -f "$HOME/app.tar.gz" ]    && tar -xzf "$HOME/app.tar.gz"    -C "$APP_PATH"    && rm -f "$HOME/app.tar.gz"
           [ -f "$HOME/public.tar.gz" ] && tar -xzf "$HOME/public.tar.gz" -C "$PUBLIC_PATH" && rm -f "$HOME/public.tar.gz"
 
-          # Put public index in place if provided
           if [ -f "$HOME/index.hostinger.php" ]; then
             mv -f "$HOME/index.hostinger.php" "$PUBLIC_PATH/index.php"
           fi
 
           cd "$APP_PATH"
 
-          # Composer (fallback to local PHAR if not installed)
           if command -v composer >/dev/null 2>&1; then
             composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
           else
@@ -114,17 +116,14 @@ jobs:
             php composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
           fi
 
-          # Ensure .env exists (don't overwrite if present)
           if [ ! -f ".env" ]; then
             cp -f .env.example .env || true
           fi
 
-          # Generate APP_KEY if empty
           if ! grep -q "^APP_KEY=" .env || [ -z "$(grep '^APP_KEY=' .env | cut -d= -f2)" ]; then
             php artisan key:generate --force || true
           fi
 
-          # Best-effort framework tasks
           php artisan storage:link    || true
           php artisan migrate --force || true
           php artisan optimize:clear  || true
