@@ -110,7 +110,7 @@ jobs:
           fi
 
       # Step 11: Execute the deployment script on the remote server.
-      # This script unpacks bundles, finds PHP 8.3, installs dependencies, and runs Artisan commands.
+      # This script unpacks bundles, sets up dirs, installs deps, and runs Artisan commands.
       - name: Deploy on server (composer + artisan + publish public)
         run: |
           ssh -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
@@ -132,31 +132,42 @@ jobs:
 
           mkdir -p "$APP_PATH" "$PUBLIC_PATH" "$PUBLIC_PATH/build"
 
+          # Unpack bundles uploaded by the workflow
           [ -f "$HOME/app.tar.gz" ]    && tar -xzf "$HOME/app.tar.gz"    -C "$APP_PATH"    && rm -f "$HOME/app.tar.gz"
           [ -f "$HOME/public.tar.gz" ] && tar -xzf "$HOME/public.tar.gz" -C "$PUBLIC_PATH" && rm -f "$HOME/public.tar.gz"
 
-          # Optional index shim
+          # Optional Hostinger index shim into public/
           if [ -f "$HOME/index.hostinger.php" ]; then
             mv -f "$HOME/index.hostinger.php" "$PUBLIC_PATH/index.php"
           fi
 
           cd "$APP_PATH"
 
-          # Always use Composer 2 locally (don’t rely on system composer)
-          "$PHP_BIN" -r "copy('https://getcomposer.org/installer','composer-setup.php');"
-          "$PHP_BIN" composer-setup.php --2 --filename=composer.phar
-          "$PHP_BIN" composer.phar --version
+          # --- Ensure cache/storage dirs exist BEFORE composer scripts run ---
+          mkdir -p storage/framework/cache/data \
+                   storage/framework/sessions \
+                   storage/framework/views \
+                   bootstrap/cache
 
-          # Install with the selected PHP version
-          "$PHP_BIN" composer.phar install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+          # Reasonable perms for shared hosting (adjust if needed)
+          chmod -R 775 storage bootstrap/cache || true
 
-          # Bootstrap env if needed
+          # --- Prepare .env if missing (keeps post-scripts happy) ---
           [ -f .env ] || cp -f .env.example .env || true
+          # If APP_KEY empty, generate one
           if ! grep -q "^APP_KEY=" .env || [ -z "$(grep '^APP_KEY=' .env | cut -d= -f2)" ]; then
             "$PHP_BIN" artisan key:generate --force || true
           fi
 
-          # Run standard Laravel deployment commands with the selected PHP version
+          # --- Composer 2 (local phar so we control the version) ---
+          "$PHP_BIN" -r "copy('https://getcomposer.org/installer','composer-setup.php');"
+          "$PHP_BIN" composer-setup.php --2 --filename=composer.phar
+          "$PHP_BIN" composer.phar --version
+
+          # Install deps; now post-autoload-dump (artisan config:clear) will succeed
+          "$PHP_BIN" composer.phar install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+
+          # --- App bootstrap / optimize ---
           "$PHP_BIN" artisan storage:link    || true
           "$PHP_BIN" artisan migrate --force || true
           "$PHP_BIN" artisan optimize:clear  || true
