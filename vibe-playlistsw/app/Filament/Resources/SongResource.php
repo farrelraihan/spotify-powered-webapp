@@ -25,7 +25,17 @@ class SongResource extends Resource
     // Ensure Filament always gets a proper Eloquent builder (and eager-load tags)
     public static function getEloquentQuery(): Builder
     {
-        return Song::query()->with('tags');
+        $query = \App\Models\Song::query()->with('tags');
+
+        $user = auth()->user();
+        if ($user && !($user->is_admin ?? false)) {
+            $query->where(function (Builder $q) use ($user) {
+                $q->where('user_id', $user->id)
+                ->orWhereHas('playlists', fn (Builder $p) => $p->where('user_id', $user->id));
+            });
+        }
+
+        return $query;
     }
 
     public static function form(Form $form): Form
@@ -323,4 +333,6 @@ class SongResource extends Resource
             'edit'   => Pages\EditSong::route('/{record}/edit'),
         ];
     }
+
+
 }

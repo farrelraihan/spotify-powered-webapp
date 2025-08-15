@@ -28,6 +28,9 @@ class PlaylistResource extends Resource
                 Forms\Components\TextInput::make('name')->required()->maxLength(255),
                 Forms\Components\Toggle::make('is_public')->label('Public'),
                 Forms\Components\Textarea::make('description')->rows(3),
+
+                Forms\Components\Hidden::make('user_id')->default(fn () => auth()->id()),
+
             ]);
     }
 
@@ -84,5 +87,17 @@ class PlaylistResource extends Resource
             'create' => Pages\CreatePlaylist::route('/create'),
             'edit' => Pages\EditPlaylist::route('/{record}/edit'),
         ];
+    }
+
+    public static function getEloquentQuery(): Builder
+    {
+        $query = \App\Models\Playlist::query();
+        $user = auth()->user();
+
+        if ($user && !($user->is_admin ?? false)) {
+            $query->where('user_id', $user->id);
+        }
+
+        return $query;
     }
 }
