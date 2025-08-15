@@ -2,89 +2,132 @@ name: Deploy via SSH (Hostinger split app/public)
 
 on:
   push:
-    branches: [ main ]
-
-env:
-  SUBDIR: vibe-playlistsw
+    branches: [ "main" ]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    env:
-      SUBDIR: vibe-playlistsw
-      HOST:    ${{ secrets.HOST_SSH_HOST  || secrets.SSH_HOST }}
-      PORT:    ${{ secrets.HOST_SSH_PORT  || secrets.SSH_PORT || '22' }}
-      USER:    ${{ secrets.HOST_SSH_USER  || secrets.SSH_USER }}
-      APP_DIR: ${{ secrets.HOST_APP_DIR   || secrets.APP_DIR }}
-      PUB_DIR: ${{ secrets.HOST_PUBLIC_DIR|| secrets.PUBLIC_DIR }}
 
+    env:
+      # Change only if your Laravel app is not inside "vibe-playlistsw"
+      SUBDIR: vibe-playlistsw
+
+      # Secrets (DO NOT hardcode values here)
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      APP_PATH: ${{ secrets.APP_PATH }}
+      PUBLIC_PATH: ${{ secrets.PUBLIC_PATH }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-- name: Prepare SSH
-  shell: bash
-  run: |
-    mkdir -p ~/.ssh
-    printf "%s" "${{ secrets.HOST_SSH_KEY || secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
-    tr -d '\r' < ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.clean && mv ~/.ssh/id_ed25519.clean ~/.ssh/id_ed25519
-    chmod 600 ~/.ssh/id_ed25519
-
-    PORT="${PORT:-22}"                 # default if missing
-    echo "Using SSH host: $HOST, port: $PORT"
-    ssh-keyscan -p "$PORT" "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
-
-
-
+      # Build Vite
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 18
 
-      - name: Build assets (Vite)
-        working-directory: ./${{ env.SUBDIR }}
+      - name: Install Node deps & build
+        working-directory: ${{ env.SUBDIR }}
         run: |
           npm ci
           npm run build
 
-      - name: Create tarball to upload
-        run: |
-          tar -C "${{ env.SUBDIR }}" -czf /tmp/app.tar.gz \
-            --exclude='.git' --exclude='node_modules' --exclude='vendor' .
+      # PHP just for local validation (we don’t run composer on runner)
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          coverage: none
 
-      - name: Upload bundle to server
+      # SSH prep (fixes the earlier -p error)
+      - name: Prepare SSH
         shell: bash
         run: |
-          PORT="${PORT:-22}"
-          scp -i ~/.ssh/id_ed25519 -P "$PORT" /tmp/app.tar.gz \
-            "$USER@$HOST:/home/$USER/app.tar.gz"
+          mkdir -p ~/.ssh
+          printf "%s" "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
+          tr -d '\r' < ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.clean && mv ~/.ssh/id_ed25519.clean ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          PORT="${SSH_PORT:-22}"
+          echo "Known host add: ${SSH_HOST}:${PORT}"
+          ssh-keyscan -p "$PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Deploy on server (composer + artisan)
+      # Create two tarballs: app (source) + public (built assets + index.php)
+      - name: Create app bundle
+        working-directory: ${{ env.SUBDIR }}
+        run: |
+          tar \
+            --exclude=".git" \
+            --exclude="node_modules" \
+            --exclude="vendor" \
+            --exclude="public/build" \
+            -czf ../bundle-app.tar.gz .
+
+      - name: Create public bundle
+        working-directory: ${{ env.SUBDIR }}
+        run: |
+          mkdir -p ../_pub && rm -rf ../_pub/*
+          cp -a public/build ../_pub/build
+          cp -a public/index.hostinger.php ../_pub/index.php
+          tar -C ../_pub -czf ../bundle-public.tar.gz .
+
+      - name: Upload bundles to server
         shell: bash
         run: |
-          PORT="${PORT:-22}"
-          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" bash -euo pipefail -lc "
-            mkdir -p \"$APP_DIR\" \"$PUB_DIR\"
-            tar -xzf ~/app.tar.gz -C \"$APP_DIR\"
-            rm -f ~/app.tar.gz
+          PORT="${SSH_PORT:-22}"
+          scp -P "$PORT" bundle-app.tar.gz    "${SSH_USER}@${SSH_HOST}:${APP_PATH}/bundle-app.tar.gz"
+          scp -P "$PORT" bundle-public.tar.gz "${SSH_USER}@${SSH_HOST}:${PUBLIC_PATH}/bundle-public.tar.gz"
 
-            # install composer locally if missing
+      - name: Deploy on server (composer + artisan + publish public)
+        shell: bash
+        run: |
+          PORT="${SSH_PORT:-22}"
+          ssh -p "$PORT" "${SSH_USER}@${SSH_HOST}" "APP_PATH='${APP_PATH}' PUBLIC_PATH='${PUBLIC_PATH}' bash -s" << 'EOSSH'
+            set -e
+
+            echo "APP_PATH: $APP_PATH"
+            echo "PUBLIC_PATH: $PUBLIC_PATH"
+
+            mkdir -p "$APP_PATH" "$PUBLIC_PATH"
+
+            # Unpack uploads
+            tar -xzf "$APP_PATH/bundle-app.tar.gz" -C "$APP_PATH" && rm -f "$APP_PATH/bundle-app.tar.gz"
+            tar -xzf "$PUBLIC_PATH/bundle-public.tar.gz" -C "$PUBLIC_PATH" && rm -f "$PUBLIC_PATH/bundle-public.tar.gz"
+
+            cd "$APP_PATH"
+
+            # Ensure Composer available on server
             if ! command -v composer >/dev/null 2>&1; then
-              mkdir -p ~/bin
-              php -r \"copy('https://getcomposer.org/installer','composer-setup.php');\"
-              php composer-setup.php --install-dir=\$HOME/bin --filename=composer
+              EXPECTED_CHECKSUM="$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')"
+              php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+              ACTUAL_CHECKSUM="$(php -r 'echo hash_file(\"sha384\", \"composer-setup.php\");')"
+              if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
+                echo 'ERROR: Invalid composer installer checksum' >&2
+                rm composer-setup.php
+                exit 1
+              fi
+              php composer-setup.php --quiet
               rm composer-setup.php
-              export PATH=\"\$HOME/bin:\$PATH\"
+              mv composer.phar "$HOME/composer.phar"
+              COMPOSER="php $HOME/composer.phar"
+            else
+              COMPOSER="composer"
             fi
 
-            cd \"$APP_DIR\"
-            composer install --no-dev --prefer-dist --optimize-autoloader
+            # Install PHP deps (prod)
+            $COMPOSER install --no-dev --prefer-dist --optimize-autoloader
 
+            # Laravel tasks (idempotent)
             php artisan key:generate --force || true
             php artisan migrate --force || true
-            php artisan config:cache && php artisan route:cache && php artisan view:cache || true
+            php artisan config:cache || true
+            php artisan route:cache  || true
+            php artisan view:cache   || true
 
-            # ensure Hostinger public points into Laravel public
-            cp -f \"$APP_DIR/index.hostinger.php\" \"$PUB_DIR/index.php\"
-          "
+            # Make sure storage is writable
+            chmod -R ug+rw storage bootstrap/cache || true
+
+            echo "Deploy finished."
+          EOSSH
