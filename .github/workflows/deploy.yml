@@ -2,7 +2,10 @@ name: Deploy via SSH (Hostinger split app/public)
 
 on:
   push:
-    branches: [ main ]  # change to "master" if that's your branch
+    branches: [ main ]
+
+env:
+  SUBDIR: vibe-playlistsw   # <<--- your Laravel folder in the repo
 
 jobs:
   deploy:
@@ -12,71 +15,64 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # PHP deps
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.2'
-          tools: composer
+      - name: Prepare SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.HOST_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p ${{ secrets.HOST_SSH_PORT }} ${{ secrets.HOST_SSH_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Install Composer deps
-        run: composer install --no-dev --prefer-dist --optimize-autoloader
-
-      # Frontend build
+      # Optional: build Vite assets so your public pages using @vite get CSS/JS.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
-      - name: Install Node deps
-        run: npm ci
-
-      - name: Build assets
-        run: npm run build
-
-      # Swap in the Hostinger index (loads from ../app)
-      - name: Prepare Hostinger index.php
-        run: cp public/index.hostinger.php public/index.php
-
-      # Make two tarballs: app (everything except /public) and public (only /public)
-      - name: Create bundles
+      - name: Build assets (Vite)
+        working-directory: ./${{ env.SUBDIR }}
         run: |
-          tar -czf deploy_app.tgz \
-            --exclude=public \
-            --exclude=.git \
-            --exclude=tests \
-            --exclude=.github \
-            --exclude=node_modules \
+          npm ci
+          npm run build
+
+      - name: Create tarball to upload
+        run: |
+          tar -C "${{ env.SUBDIR }}" -czf /tmp/app.tar.gz \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='vendor' \
             .
-          tar -czf deploy_public.tgz -C public .
 
-      # Upload tarballs to server ~/deploy
-      - name: Upload bundles via SCP
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT }}
-          source: |
-            deploy_app.tgz
-            deploy_public.tgz
-          target: ~/deploy
+      - name: Upload bundle to server
+        run: |
+          scp -i ~/.ssh/id_ed25519 -P ${{ secrets.HOST_SSH_PORT }} /tmp/app.tar.gz \
+            ${{ secrets.HOST_SSH_USER }}@${{ secrets.HOST_SSH_HOST }}:/home/${{ secrets.HOST_SSH_USER }}/app.tar.gz
 
-      # Unpack on server and optimize
-      - name: Unpack & optimize on server
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT }}
-          script: |
-            set -e
-            mkdir -p ${{ secrets.APP_PATH }} ${{ secrets.PUBLIC_PATH }} ~/deploy
-            tar -xzf ~/deploy/deploy_app.tgz -C ${{ secrets.APP_PATH }}
-            tar -xzf ~/deploy/deploy_public.tgz -C ${{ secrets.PUBLIC_PATH }}
-            chmod -R 775 ${{ secrets.APP_PATH }}/storage ${{ secrets.APP_PATH }}/bootstrap/cache || true
-            php ${{ secrets.APP_PATH }}/artisan config:cache
-            php ${{ secrets.APP_PATH }}/artisan route:cache
-            php ${{ secrets.APP_PATH }}/artisan view:cache
+      - name: Deploy on server (composer + artisan)
+        env:
+          APP_DIR: ${{ secrets.HOST_APP_DIR }}       # e.g. /home/u2060xxxxx/app
+          PUB_DIR: ${{ secrets.HOST_PUBLIC_DIR }}    # e.g. /home/u2060xxxxx/public_html
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -p ${{ secrets.HOST_SSH_PORT }} ${{ secrets.HOST_SSH_USER }}@${{ secrets.HOST_SSH_HOST }} bash -euo pipefail -lc "
+            mkdir -p \"\$APP_DIR\" \"\$PUB_DIR\"
+            tar -xzf ~/app.tar.gz -C \"\$APP_DIR\"
+            rm -f ~/app.tar.gz
+
+            # Composer (install locally if missing)
+            if ! command -v composer >/dev/null 2>&1; then
+              mkdir -p ~/bin
+              php -r \"copy('https://getcomposer.org/installer','composer-setup.php');\"
+              php composer-setup.php --install-dir=\$HOME/bin --filename=composer
+              rm composer-setup.php
+              export PATH=\"\$HOME/bin:\$PATH\"
+            fi
+
+            cd \"\$APP_DIR\"
+            composer install --no-dev --prefer-dist --optimize-autoloader
+
+            php artisan key:generate --force || true
+            php artisan migrate --force || true
+            php artisan config:cache && php artisan route:cache && php artisan view:cache || true
+
+            # Put Hostinger index that forwards to app/public/index.php
+            cp -f \"\$APP_DIR/index.hostinger.php\" \"\$PUB_DIR/index.php\"
+          "
