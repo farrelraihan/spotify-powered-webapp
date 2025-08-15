@@ -2,116 +2,131 @@ name: Deploy via SSH (Hostinger split app/public)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    env:
+      SSH_HOST:      ${{ secrets.SSH_HOST }}
+      SSH_PORT:      ${{ secrets.SSH_PORT }}
+      SSH_USER:      ${{ secrets.SSH_USER }}
+      APP_PATH:      ${{ secrets.APP_PATH }}
+      PUBLIC_PATH:   ${{ secrets.PUBLIC_PATH }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- Prepare SSH (decode key safely, trust host, quick auth test)
-      - name: Prepare SSH
-        shell: bash
-        env:
-          SSH_KEY_B64: ${{ secrets.SSH_KEY_B64 }}
-          SSH_HOST:    ${{ secrets.SSH_HOST }}
-          SSH_PORT:    ${{ secrets.SSH_PORT }}
-          SSH_USER:    ${{ secrets.SSH_USER }}
-        run: |
-          set -e
-          mkdir -p ~/.ssh
-          echo "$SSH_KEY_B64" | base64 -d > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          PORT="${SSH_PORT:-22}"
-          ssh-keyscan -p "$PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          # sanity: ensure the key is readable by ssh
-          ssh -o BatchMode=yes -p "$PORT" "$SSH_USER@$SSH_HOST" "echo ssh-ok"
+      # ---- Build frontend (Vite) ----
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      # --- Build Vite (if you have package.json)
+      - name: Install Node deps
+        run: npm ci
+
       - name: Build assets (Vite)
-        shell: bash
+        run: npm run build
+
+      # ---- SSH prep (decode base64 key + known_hosts) ----
+      - name: Prepare SSH
         run: |
-          if [ -f package.json ]; then
-            npm ci || npm i
-            npm run build || echo "No build script; skipping"
-          else
-            echo "No package.json; skipping Vite build"
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY_B64 }}" | base64 -d > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${SSH_PORT}" -t ed25519 "${SSH_HOST}" >> ~/.ssh/known_hosts
+
+      # ---- Stage then tar (avoids "file changed as we read it") ----
+      - name: Stage files
+        run: |
+          rm -rf _stage_app _stage_pub _app _pub
+          mkdir -p _stage_app _stage_pub _app _pub
+
+          # Copy the app (exclude heavy/runtime dirs)
+          rsync -a . _stage_app \
+            --exclude .git \
+            --exclude node_modules \
+            --exclude vendor \
+            --exclude public/build \
+            --exclude storage
+
+          # Copy only built assets into public staging
+          if [ -d public/build ]; then
+            rsync -a public/build/ _stage_pub/build/
           fi
 
-      # --- Create app bundle (exclude heavy/runtime stuff)
       - name: Create app bundle
-        shell: bash
-        run: |
-          tar --exclude-vcs \
-              --exclude='./node_modules' \
-              --exclude='./vendor' \
-              --exclude='./storage/logs/*' \
-              --exclude='./storage/framework/cache/*' \
-              --exclude='./public/build' \
-              -czf _app.tgz .
+        run: tar -C _stage_app -czf _app/app.tar.gz .
 
-      # --- Create public bundle (only built assets / special index)
       - name: Create public bundle
-        shell: bash
         run: |
-          mkdir -p _pub
-          [ -d public/build ] && cp -R public/build _pub/ || true
-          # If you keep a Hostinger-specific index file, include it:
-          [ -f public/index.hostinger.php ] && cp public/index.hostinger.php _pub/ || true
-          tar -czf _pub.tgz -C _pub .
+          if [ -d _stage_pub/build ]; then
+            tar -C _stage_pub -czf _pub/public.tar.gz build
+          else
+            # make an empty tar so later steps don't fail
+            tar -czf _pub/public.tar.gz --files-from /dev/null
+          fi
 
-      # --- Upload bundles to the server
+      # ---- Upload to server home ----
       - name: Upload bundles to server
-        shell: bash
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
-          SSH_USER: ${{ secrets.SSH_USER }}
         run: |
-          set -e
-          PORT="${SSH_PORT:-22}"
-          ssh -p "$PORT" "$SSH_USER@$SSH_HOST" "mkdir -p ~/deploy_tmp"
-          scp -P "$PORT" _app.tgz _pub.tgz "$SSH_USER@$SSH_HOST:~/deploy_tmp/"
+          scp -P "${SSH_PORT}" _app/app.tar.gz _pub/public.tar.gz \
+            "${SSH_USER}@${SSH_HOST}:~/"
+          # optional: Hostinger front controller
+          if [ -f index.hostinger.php ]; then
+            scp -P "${SSH_PORT}" index.hostinger.php \
+              "${SSH_USER}@${SSH_HOST}:~/index.hostinger.php"
+          fi
 
-      # --- Extract & deploy, then composer+artisan on the server
-      - name: Deploy on server (composer + artisan + publish public)
-        shell: bash
-        env:
-          SSH_HOST:    ${{ secrets.SSH_HOST }}
-          SSH_PORT:    ${{ secrets.SSH_PORT }}
-          SSH_USER:    ${{ secrets.SSH_USER }}
-          APP_PATH:    ${{ secrets.APP_PATH }}
-          PUBLIC_PATH: ${{ secrets.PUBLIC_PATH }}
+      # ---- Remote deploy (composer + artisan + publish public/build) ----
+      - name: Deploy on server
         run: |
+          ssh -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
+            "APP_PATH='${APP_PATH}' PUBLIC_PATH='${PUBLIC_PATH}' bash -s" <<'EOSSH'
           set -e
-          PORT="${SSH_PORT:-22}"
-          ssh -p "$PORT" "$SSH_USER@$SSH_HOST" "
-            set -e
-            mkdir -p \"$APP_PATH\" \"$PUBLIC_PATH\"
-            cd ~/deploy_tmp
-            tar -xzf _app.tgz -C \"$APP_PATH\"
-            tar -xzf _pub.tgz -C \"$PUBLIC_PATH\"
-            rm -f _app.tgz _pub.tgz
 
-            cd \"$APP_PATH\"
+          : "${APP_PATH:?APP_PATH not set}"
+          : "${PUBLIC_PATH:?PUBLIC_PATH not set}"
 
-            # Composer (if available on Hostinger)
-            if command -v composer >/dev/null 2>&1; then
-              composer install --no-dev --optimize-autoloader
-            else
-              echo 'Composer not found on server; skipping.'
-            fi
+          mkdir -p "$APP_PATH" "$PUBLIC_PATH" "$PUBLIC_PATH/build"
 
-            # Laravel maintenance
-            if command -v php >/dev/null 2>&1; then
-              php artisan migrate --force || true
-              php artisan storage:link || true
-              php artisan optimize:clear || true
-              php artisan optimize || true
-            fi
+          # Extract uploads
+          [ -f "$HOME/app.tar.gz" ]    && tar -xzf "$HOME/app.tar.gz" -C "$APP_PATH"    && rm -f "$HOME/app.tar.gz"
+          [ -f "$HOME/public.tar.gz" ] && tar -xzf "$HOME/public.tar.gz" -C "$PUBLIC_PATH" && rm -f "$HOME/public.tar.gz"
 
-            echo 'Deploy finished.'
-          "
+          # Put public index in place if provided
+          if [ -f "$HOME/index.hostinger.php" ]; then
+            mv -f "$HOME/index.hostinger.php" "$PUBLIC_PATH/index.php"
+          fi
+
+          cd "$APP_PATH"
+
+          # Composer (fallback to local PHAR if not installed)
+          if command -v composer >/dev/null 2>&1; then
+            composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+          else
+            php -r "copy('https://getcomposer.org/installer','composer-setup.php');"
+            php composer-setup.php --filename=composer
+            php composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+          fi
+
+          # Ensure .env exists (don't overwrite if present)
+          if [ ! -f ".env" ]; then
+            cp -f .env.example .env || true
+          fi
+
+          # Generate APP_KEY if empty
+          if ! grep -q "^APP_KEY=" .env || [ -z "$(grep '^APP_KEY=' .env | cut -d= -f2)" ]; then
+            php artisan key:generate --force || true
+          fi
+
+          # Best-effort framework tasks
+          php artisan storage:link    || true
+          php artisan migrate --force || true
+          php artisan optimize:clear  || true
+          php artisan optimize        || true
+          EOSSH
