@@ -5,24 +5,38 @@ on:
     branches: [ main ]
 
 env:
-  SUBDIR: vibe-playlistsw   # <<--- your Laravel folder in the repo
+  SUBDIR: vibe-playlistsw
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      SUBDIR: vibe-playlistsw
+      HOST:    ${{ secrets.HOST_SSH_HOST  || secrets.SSH_HOST }}
+      PORT:    ${{ secrets.HOST_SSH_PORT  || secrets.SSH_PORT || '22' }}
+      USER:    ${{ secrets.HOST_SSH_USER  || secrets.SSH_USER }}
+      APP_DIR: ${{ secrets.HOST_APP_DIR   || secrets.APP_DIR }}
+      PUB_DIR: ${{ secrets.HOST_PUBLIC_DIR|| secrets.PUBLIC_DIR }}
+
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.HOST_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p ${{ secrets.HOST_SSH_PORT }} ${{ secrets.HOST_SSH_HOST }} >> ~/.ssh/known_hosts
+- name: Prepare SSH
+  shell: bash
+  run: |
+    mkdir -p ~/.ssh
+    printf "%s" "${{ secrets.HOST_SSH_KEY || secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
+    tr -d '\r' < ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.clean && mv ~/.ssh/id_ed25519.clean ~/.ssh/id_ed25519
+    chmod 600 ~/.ssh/id_ed25519
 
-      # Optional: build Vite assets so your public pages using @vite get CSS/JS.
+    PORT="${PORT:-22}"                 # default if missing
+    echo "Using SSH host: $HOST, port: $PORT"
+    ssh-keyscan -p "$PORT" "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -37,27 +51,25 @@ jobs:
       - name: Create tarball to upload
         run: |
           tar -C "${{ env.SUBDIR }}" -czf /tmp/app.tar.gz \
-            --exclude='.git' \
-            --exclude='node_modules' \
-            --exclude='vendor' \
-            .
+            --exclude='.git' --exclude='node_modules' --exclude='vendor' .
 
       - name: Upload bundle to server
+        shell: bash
         run: |
-          scp -i ~/.ssh/id_ed25519 -P ${{ secrets.HOST_SSH_PORT }} /tmp/app.tar.gz \
-            ${{ secrets.HOST_SSH_USER }}@${{ secrets.HOST_SSH_HOST }}:/home/${{ secrets.HOST_SSH_USER }}/app.tar.gz
+          PORT="${PORT:-22}"
+          scp -i ~/.ssh/id_ed25519 -P "$PORT" /tmp/app.tar.gz \
+            "$USER@$HOST:/home/$USER/app.tar.gz"
 
       - name: Deploy on server (composer + artisan)
-        env:
-          APP_DIR: ${{ secrets.HOST_APP_DIR }}       # e.g. /home/u2060xxxxx/app
-          PUB_DIR: ${{ secrets.HOST_PUBLIC_DIR }}    # e.g. /home/u2060xxxxx/public_html
+        shell: bash
         run: |
-          ssh -i ~/.ssh/id_ed25519 -p ${{ secrets.HOST_SSH_PORT }} ${{ secrets.HOST_SSH_USER }}@${{ secrets.HOST_SSH_HOST }} bash -euo pipefail -lc "
-            mkdir -p \"\$APP_DIR\" \"\$PUB_DIR\"
-            tar -xzf ~/app.tar.gz -C \"\$APP_DIR\"
+          PORT="${PORT:-22}"
+          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" bash -euo pipefail -lc "
+            mkdir -p \"$APP_DIR\" \"$PUB_DIR\"
+            tar -xzf ~/app.tar.gz -C \"$APP_DIR\"
             rm -f ~/app.tar.gz
 
-            # Composer (install locally if missing)
+            # install composer locally if missing
             if ! command -v composer >/dev/null 2>&1; then
               mkdir -p ~/bin
               php -r \"copy('https://getcomposer.org/installer','composer-setup.php');\"
@@ -66,13 +78,13 @@ jobs:
               export PATH=\"\$HOME/bin:\$PATH\"
             fi
 
-            cd \"\$APP_DIR\"
+            cd \"$APP_DIR\"
             composer install --no-dev --prefer-dist --optimize-autoloader
 
             php artisan key:generate --force || true
             php artisan migrate --force || true
             php artisan config:cache && php artisan route:cache && php artisan view:cache || true
 
-            # Put Hostinger index that forwards to app/public/index.php
-            cp -f \"\$APP_DIR/index.hostinger.php\" \"\$PUB_DIR/index.php\"
+            # ensure Hostinger public points into Laravel public
+            cp -f \"$APP_DIR/index.hostinger.php\" \"$PUB_DIR/index.php\"
           "
