@@ -1,12 +1,19 @@
+# GitHub Actions workflow for deploying a Laravel project to Hostinger
+# This workflow handles a split directory structure where the main application
+# and the public assets are in separate locations on the server.
+
 name: Deploy via SSH (Hostinger split app/public)
 
+# Triggers the workflow on push events to the main branch
+# and also allows manual triggering from the Actions tab (workflow_dispatch).
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
 env:
-  # Your Laravel project folder inside the repo:
+  # Define the directory of your Laravel project within the repository.
+  # This is used to set the working directory for most steps.
   PROJECT_DIR: vibe-playlistsw
 
 jobs:
@@ -16,45 +23,55 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: vibe-playlistsw  # <— run “run:” steps inside the Laravel subfolder
+        # All 'run' steps will execute inside this directory.
+        working-directory: ${{ env.PROJECT_DIR }}
 
     steps:
+      # Step 1: Check out the repository code
       - name: Checkout
         uses: actions/checkout@v4
 
-      # -------- Node / Vite (only if package.json exists) --------
+      # Step 2: Set up Node.js environment for building frontend assets.
+      # This block is conditional and only runs if a package.json file exists.
       - name: Setup Node
+        if: hashFiles('vibe-playlistsw/package.json') != ''
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
+      # Step 3: Install Node.js dependencies using a lockfile for consistency.
       - name: Install Node deps (lockfile)
         if: ${{ hashFiles('vibe-playlistsw/package-lock.json', 'vibe-playlistsw/npm-shrinkwrap.json') != '' }}
         run: npm ci
 
+      # Step 4: Install Node.js dependencies if no lockfile is present.
       - name: Install Node deps (no lockfile)
         if: ${{ hashFiles('vibe-playlistsw/package-lock.json', 'vibe-playlistsw/npm-shrinkwrap.json') == '' && hashFiles('vibe-playlistsw/package.json') != '' }}
         run: npm install --no-audit --no-fund --legacy-peer-deps
 
+      # Step 5: Build frontend assets using Vite.
       - name: Build assets (Vite)
         if: ${{ hashFiles('vibe-playlistsw/package.json') != '' }}
         run: npm run build
 
-      # -------- SSH prep --------
+      # Step 6: Prepare SSH connection by setting up the private key and known_hosts.
       - name: Prepare SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_KEY_B64 }}" | base64 -d > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "${{ secrets.SSH_PORT }}" -t ed25519 "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+        # The working-directory default is overridden here to run in the root.
+        working-directory: .
 
-      # -------- Stage & bundle (avoid tar race) --------
+      # Step 7: Stage files for bundling, separating application and public files.
+      # This avoids including unnecessary files like .git, node_modules, etc.
       - name: Stage files
         run: |
           rm -rf _stage_app _stage_pub _app _pub
           mkdir -p _stage_app _stage_pub _app _pub
 
-          # Copy app (exclude heavy/generated stuff)
+          # Copy application files, excluding development/generated directories.
           rsync -a . _stage_app \
             --exclude .git \
             --exclude node_modules \
@@ -62,14 +79,17 @@ jobs:
             --exclude public/build \
             --exclude storage
 
-          # Copy built assets if present
+          # Copy only the built assets to the public staging directory.
           if [ -d public/build ]; then
             rsync -a public/build/ _stage_pub/build/
           fi
 
+      # Step 8: Create a compressed tarball of the application files.
       - name: Create app bundle
         run: tar -C _stage_app -czf _app/app.tar.gz .
 
+      # Step 9: Create a compressed tarball of the public assets.
+      # If no assets were built, an empty tarball is created.
       - name: Create public bundle
         run: |
           if [ -d _stage_pub/build ]; then
@@ -78,24 +98,24 @@ jobs:
             tar -czf _pub/public.tar.gz --files-from /dev/null
           fi
 
-      # -------- Upload bundles --------
+      # Step 10: Upload the application and public bundles to the server.
       - name: Upload bundles to server
         run: |
           scp -P "${{ secrets.SSH_PORT }}" _app/app.tar.gz _pub/public.tar.gz \
             "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:~/"
-          # Optional Hostinger index shim, if this file exists *inside PROJECT_DIR*
+          # Optionally upload a custom index file for Hostinger.
           if [ -f index.hostinger.php ]; then
             scp -P "${{ secrets.SSH_PORT }}" index.hostinger.php \
               "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:~/index.hostinger.php"
           fi
 
-      # -------- Remote deploy --------
+      # Step 11: Execute the deployment script on the remote server.
+      # This script unpacks the bundles, installs dependencies, and runs Artisan commands.
       - name: Deploy on server (composer + artisan + publish public)
         run: |
           ssh -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
             "APP_PATH='${{ secrets.APP_PATH }}' PUBLIC_PATH='${{ secrets.PUBLIC_PATH }}' bash -s" <<'EOSSH'
           set -e
-
           : "${APP_PATH:?APP_PATH not set}"
           : "${PUBLIC_PATH:?PUBLIC_PATH not set}"
 
@@ -104,27 +124,30 @@ jobs:
           [ -f "$HOME/app.tar.gz" ]    && tar -xzf "$HOME/app.tar.gz"    -C "$APP_PATH"    && rm -f "$HOME/app.tar.gz"
           [ -f "$HOME/public.tar.gz" ] && tar -xzf "$HOME/public.tar.gz" -C "$PUBLIC_PATH" && rm -f "$HOME/public.tar.gz"
 
+          # Optional index shim
           if [ -f "$HOME/index.hostinger.php" ]; then
             mv -f "$HOME/index.hostinger.php" "$PUBLIC_PATH/index.php"
           fi
 
           cd "$APP_PATH"
 
-          if command -v composer >/dev/null 2>&1; then
-            composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
-          else
-            php -r "copy('https://getcomposer.org/installer','composer-setup.php');"
-            php composer-setup.php --filename=composer
-            php composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
-          fi
+          # Always use Composer v2 locally (don’t rely on system composer)
+          php -v
+          php -r "copy('https://getcomposer.org/installer','composer-setup.php');"
+          php composer-setup.php --2 --filename=composer.phar
+          php composer.phar --version
 
-          # Bootstrap .env if missing (adjust if you deploy real secrets via .env)
+          php composer.phar install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+
+          # Bootstrap .env if missing
           if [ ! -f ".env" ]; then cp -f .env.example .env || true; fi
 
+          # Generate an app key if it's missing.
           if ! grep -q "^APP_KEY=" .env || [ -z "$(grep '^APP_KEY=' .env | cut -d= -f2)" ]; then
             php artisan key:generate --force || true
           fi
 
+          # Run standard Laravel deployment commands.
           php artisan storage:link    || true
           php artisan migrate --force || true
           php artisan optimize:clear  || true
