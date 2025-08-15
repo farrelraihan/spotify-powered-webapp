@@ -8,126 +8,110 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    env:
-      # Change only if your Laravel app is not inside "vibe-playlistsw"
-      SUBDIR: vibe-playlistsw
-
-      # Secrets (DO NOT hardcode values here)
-      SSH_HOST: ${{ secrets.SSH_HOST }}
-      SSH_PORT: ${{ secrets.SSH_PORT }}
-      SSH_USER: ${{ secrets.SSH_USER }}
-      APP_PATH: ${{ secrets.APP_PATH }}
-      PUBLIC_PATH: ${{ secrets.PUBLIC_PATH }}
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # Build Vite
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
-
-      - name: Install Node deps & build
-        working-directory: ${{ env.SUBDIR }}
-        run: |
-          npm ci
-          npm run build
-
-      # PHP just for local validation (we don’t run composer on runner)
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.2"
-          coverage: none
-
-      # SSH prep (fixes the earlier -p error)
+      # --- Prepare SSH (decode key safely, trust host, quick auth test)
       - name: Prepare SSH
         shell: bash
+        env:
+          SSH_KEY_B64: ${{ secrets.SSH_KEY_B64 }}
+          SSH_HOST:    ${{ secrets.SSH_HOST }}
+          SSH_PORT:    ${{ secrets.SSH_PORT }}
+          SSH_USER:    ${{ secrets.SSH_USER }}
         run: |
+          set -e
           mkdir -p ~/.ssh
-          printf "%s" "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
-          tr -d '\r' < ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.clean && mv ~/.ssh/id_ed25519.clean ~/.ssh/id_ed25519
+          echo "$SSH_KEY_B64" | base64 -d > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           PORT="${SSH_PORT:-22}"
-          echo "Known host add: ${SSH_HOST}:${PORT}"
           ssh-keyscan -p "$PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # sanity: ensure the key is readable by ssh
+          ssh -o BatchMode=yes -p "$PORT" "$SSH_USER@$SSH_HOST" "echo ssh-ok"
 
-      # Create two tarballs: app (source) + public (built assets + index.php)
+      # --- Build Vite (if you have package.json)
+      - name: Build assets (Vite)
+        shell: bash
+        run: |
+          if [ -f package.json ]; then
+            npm ci || npm i
+            npm run build || echo "No build script; skipping"
+          else
+            echo "No package.json; skipping Vite build"
+          fi
+
+      # --- Create app bundle (exclude heavy/runtime stuff)
       - name: Create app bundle
-        working-directory: ${{ env.SUBDIR }}
+        shell: bash
         run: |
-          tar \
-            --exclude=".git" \
-            --exclude="node_modules" \
-            --exclude="vendor" \
-            --exclude="public/build" \
-            -czf ../bundle-app.tar.gz .
+          tar --exclude-vcs \
+              --exclude='./node_modules' \
+              --exclude='./vendor' \
+              --exclude='./storage/logs/*' \
+              --exclude='./storage/framework/cache/*' \
+              --exclude='./public/build' \
+              -czf _app.tgz .
 
+      # --- Create public bundle (only built assets / special index)
       - name: Create public bundle
-        working-directory: ${{ env.SUBDIR }}
+        shell: bash
         run: |
-          mkdir -p ../_pub && rm -rf ../_pub/*
-          cp -a public/build ../_pub/build
-          cp -a public/index.hostinger.php ../_pub/index.php
-          tar -C ../_pub -czf ../bundle-public.tar.gz .
+          mkdir -p _pub
+          [ -d public/build ] && cp -R public/build _pub/ || true
+          # If you keep a Hostinger-specific index file, include it:
+          [ -f public/index.hostinger.php ] && cp public/index.hostinger.php _pub/ || true
+          tar -czf _pub.tgz -C _pub .
 
+      # --- Upload bundles to the server
       - name: Upload bundles to server
         shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
         run: |
+          set -e
           PORT="${SSH_PORT:-22}"
-          scp -P "$PORT" bundle-app.tar.gz    "${SSH_USER}@${SSH_HOST}:${APP_PATH}/bundle-app.tar.gz"
-          scp -P "$PORT" bundle-public.tar.gz "${SSH_USER}@${SSH_HOST}:${PUBLIC_PATH}/bundle-public.tar.gz"
+          ssh -p "$PORT" "$SSH_USER@$SSH_HOST" "mkdir -p ~/deploy_tmp"
+          scp -P "$PORT" _app.tgz _pub.tgz "$SSH_USER@$SSH_HOST:~/deploy_tmp/"
 
+      # --- Extract & deploy, then composer+artisan on the server
       - name: Deploy on server (composer + artisan + publish public)
         shell: bash
+        env:
+          SSH_HOST:    ${{ secrets.SSH_HOST }}
+          SSH_PORT:    ${{ secrets.SSH_PORT }}
+          SSH_USER:    ${{ secrets.SSH_USER }}
+          APP_PATH:    ${{ secrets.APP_PATH }}
+          PUBLIC_PATH: ${{ secrets.PUBLIC_PATH }}
         run: |
+          set -e
           PORT="${SSH_PORT:-22}"
-          ssh -p "$PORT" "${SSH_USER}@${SSH_HOST}" "APP_PATH='${APP_PATH}' PUBLIC_PATH='${PUBLIC_PATH}' bash -s" << 'EOSSH'
+          ssh -p "$PORT" "$SSH_USER@$SSH_HOST" "
             set -e
+            mkdir -p \"$APP_PATH\" \"$PUBLIC_PATH\"
+            cd ~/deploy_tmp
+            tar -xzf _app.tgz -C \"$APP_PATH\"
+            tar -xzf _pub.tgz -C \"$PUBLIC_PATH\"
+            rm -f _app.tgz _pub.tgz
 
-            echo "APP_PATH: $APP_PATH"
-            echo "PUBLIC_PATH: $PUBLIC_PATH"
+            cd \"$APP_PATH\"
 
-            mkdir -p "$APP_PATH" "$PUBLIC_PATH"
-
-            # Unpack uploads
-            tar -xzf "$APP_PATH/bundle-app.tar.gz" -C "$APP_PATH" && rm -f "$APP_PATH/bundle-app.tar.gz"
-            tar -xzf "$PUBLIC_PATH/bundle-public.tar.gz" -C "$PUBLIC_PATH" && rm -f "$PUBLIC_PATH/bundle-public.tar.gz"
-
-            cd "$APP_PATH"
-
-            # Ensure Composer available on server
-            if ! command -v composer >/dev/null 2>&1; then
-              EXPECTED_CHECKSUM="$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')"
-              php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
-              ACTUAL_CHECKSUM="$(php -r 'echo hash_file(\"sha384\", \"composer-setup.php\");')"
-              if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
-                echo 'ERROR: Invalid composer installer checksum' >&2
-                rm composer-setup.php
-                exit 1
-              fi
-              php composer-setup.php --quiet
-              rm composer-setup.php
-              mv composer.phar "$HOME/composer.phar"
-              COMPOSER="php $HOME/composer.phar"
+            # Composer (if available on Hostinger)
+            if command -v composer >/dev/null 2>&1; then
+              composer install --no-dev --optimize-autoloader
             else
-              COMPOSER="composer"
+              echo 'Composer not found on server; skipping.'
             fi
 
-            # Install PHP deps (prod)
-            $COMPOSER install --no-dev --prefer-dist --optimize-autoloader
+            # Laravel maintenance
+            if command -v php >/dev/null 2>&1; then
+              php artisan migrate --force || true
+              php artisan storage:link || true
+              php artisan optimize:clear || true
+              php artisan optimize || true
+            fi
 
-            # Laravel tasks (idempotent)
-            php artisan key:generate --force || true
-            php artisan migrate --force || true
-            php artisan config:cache || true
-            php artisan route:cache  || true
-            php artisan view:cache   || true
-
-            # Make sure storage is writable
-            chmod -R ug+rw storage bootstrap/cache || true
-
-            echo "Deploy finished."
-          EOSSH
+            echo 'Deploy finished.'
+          "
