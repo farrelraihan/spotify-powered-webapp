@@ -45,16 +45,14 @@ jobs:
       # SSH prep (fixes the earlier -p error)
       - name: Prepare SSH
         shell: bash
-        env:
-          SSH_KEY_B64: ${{ secrets.SSH_KEY_B64 }}
         run: |
           mkdir -p ~/.ssh
-          echo "$SSH_KEY_B64" | base64 -d > ~/.ssh/id_ed25519
+          printf "%s" "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
+          tr -d '\r' < ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.clean && mv ~/.ssh/id_ed25519.clean ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           PORT="${SSH_PORT:-22}"
           echo "Known host add: ${SSH_HOST}:${PORT}"
           ssh-keyscan -p "$PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-
 
       # Create two tarballs: app (source) + public (built assets + index.php)
       - name: Create app bundle
