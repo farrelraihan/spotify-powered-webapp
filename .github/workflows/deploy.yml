@@ -5,55 +5,56 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+env:
+  # Your Laravel project folder inside the repo:
+  PROJECT_DIR: vibe-playlistsw
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    env:
-      SSH_HOST:    ${{ secrets.SSH_HOST }}
-      SSH_PORT:    ${{ secrets.SSH_PORT }}
-      SSH_USER:    ${{ secrets.SSH_USER }}
-      APP_PATH:    ${{ secrets.APP_PATH }}
-      PUBLIC_PATH: ${{ secrets.PUBLIC_PATH }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: vibe-playlistsw  # <— run “run:” steps inside the Laravel subfolder
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- Frontend build (safe with/without lockfile) ----------
+      # -------- Node / Vite (only if package.json exists) --------
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Install Node deps (lockfile)
-        if: hashFiles('package-lock.json', 'npm-shrinkwrap.json') != ''
+        if: ${{ hashFiles('vibe-playlistsw/package-lock.json', 'vibe-playlistsw/npm-shrinkwrap.json') != '' }}
         run: npm ci
 
       - name: Install Node deps (no lockfile)
-        if: hashFiles('package-lock.json', 'npm-shrinkwrap.json') == ''
+        if: ${{ hashFiles('vibe-playlistsw/package-lock.json', 'vibe-playlistsw/npm-shrinkwrap.json') == '' && hashFiles('vibe-playlistsw/package.json') != '' }}
         run: npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: Build assets (Vite)
-        if: hashFiles('package.json') != ''
-        run: |
-          # If your build script is named differently, adjust here:
-          npm run build
+        if: ${{ hashFiles('vibe-playlistsw/package.json') != '' }}
+        run: npm run build
 
-      # ---------- SSH prep ----------
+      # -------- SSH prep --------
       - name: Prepare SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_KEY_B64 }}" | base64 -d > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p "${SSH_PORT}" -t ed25519 "${SSH_HOST}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "${{ secrets.SSH_PORT }}" -t ed25519 "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
 
-      # ---------- Stage then tar (prevents "file changed as we read it") ----------
+      # -------- Stage & bundle (avoid tar race) --------
       - name: Stage files
         run: |
           rm -rf _stage_app _stage_pub _app _pub
           mkdir -p _stage_app _stage_pub _app _pub
 
+          # Copy app (exclude heavy/generated stuff)
           rsync -a . _stage_app \
             --exclude .git \
             --exclude node_modules \
@@ -61,7 +62,7 @@ jobs:
             --exclude public/build \
             --exclude storage
 
-          # Move built assets into staging if they exist
+          # Copy built assets if present
           if [ -d public/build ]; then
             rsync -a public/build/ _stage_pub/build/
           fi
@@ -74,24 +75,25 @@ jobs:
           if [ -d _stage_pub/build ]; then
             tar -C _stage_pub -czf _pub/public.tar.gz build
           else
-            # Create empty tar so later steps always succeed
             tar -czf _pub/public.tar.gz --files-from /dev/null
           fi
 
-      # ---------- Upload bundles ----------
+      # -------- Upload bundles --------
       - name: Upload bundles to server
         run: |
-          scp -P "${SSH_PORT}" _app/app.tar.gz _pub/public.tar.gz \
-            "${SSH_USER}@${SSH_HOST}:~/"
+          scp -P "${{ secrets.SSH_PORT }}" _app/app.tar.gz _pub/public.tar.gz \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:~/"
+          # Optional Hostinger index shim, if this file exists *inside PROJECT_DIR*
           if [ -f index.hostinger.php ]; then
-            scp -P "${SSH_PORT}" index.hostinger.php "${SSH_USER}@${SSH_HOST}:~/index.hostinger.php"
+            scp -P "${{ secrets.SSH_PORT }}" index.hostinger.php \
+              "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:~/index.hostinger.php"
           fi
 
-      # ---------- Remote deploy (composer + artisan + publish build) ----------
+      # -------- Remote deploy --------
       - name: Deploy on server (composer + artisan + publish public)
         run: |
-          ssh -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
-            "APP_PATH='${APP_PATH}' PUBLIC_PATH='${PUBLIC_PATH}' bash -s" <<'EOSSH'
+          ssh -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
+            "APP_PATH='${{ secrets.APP_PATH }}' PUBLIC_PATH='${{ secrets.PUBLIC_PATH }}' bash -s" <<'EOSSH'
           set -e
 
           : "${APP_PATH:?APP_PATH not set}"
@@ -116,9 +118,8 @@ jobs:
             php composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
           fi
 
-          if [ ! -f ".env" ]; then
-            cp -f .env.example .env || true
-          fi
+          # Bootstrap .env if missing (adjust if you deploy real secrets via .env)
+          if [ ! -f ".env" ]; then cp -f .env.example .env || true; fi
 
           if ! grep -q "^APP_KEY=" .env || [ -z "$(grep '^APP_KEY=' .env | cut -d= -f2)" ]; then
             php artisan key:generate --force || true
