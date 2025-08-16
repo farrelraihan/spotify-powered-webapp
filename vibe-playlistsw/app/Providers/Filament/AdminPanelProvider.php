@@ -28,7 +28,7 @@ class AdminPanelProvider extends PanelProvider
             ->path('admin')
             ->login()
 
-            // 👇 allow every authenticated user to access Filament
+            //  allow every authenticated user to access Filament
             ->auth(fn ($user) => true)
 
             ->colors([
