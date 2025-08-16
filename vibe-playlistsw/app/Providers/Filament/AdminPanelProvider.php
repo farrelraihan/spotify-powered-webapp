@@ -27,6 +27,10 @@ class AdminPanelProvider extends PanelProvider
             ->id('admin')
             ->path('admin')
             ->login()
+
+            // 👇 allow every authenticated user to access Filament
+            ->auth(fn ($user) => true)
+
             ->colors([
                 'primary' => Color::Amber,
             ])
@@ -52,7 +56,7 @@ class AdminPanelProvider extends PanelProvider
                 DispatchServingFilamentEvent::class,
             ])
             ->authMiddleware([
-                Authenticate::class,
+                Authenticate::class, // requires login only
             ]);
     }
 }
