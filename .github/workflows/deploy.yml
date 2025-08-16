@@ -64,41 +64,35 @@ jobs:
         # The working-directory default is overridden here to run in the root.
         working-directory: .
 
-      # Step 7: Stage files for bundling application files.
-      # This avoids including unnecessary files like .git, node_modules, etc.
+      # Step 7: Stage application and public files.
       - name: Stage app files
         run: |
-          rm -rf _stage_app _app _pub
-          mkdir -p _stage_app _app _pub
+          rm -rf _stage_app _stage_pub _app _pub
+          mkdir -p _stage_app _stage_pub
 
-          # Copy application files, excluding development/generated directories.
-          rsync -a . _stage_app \
-            --exclude .git \
-            --exclude .git* \
-            --exclude node_modules \
-            --exclude vendor \
-            --exclude public \
-            --exclude storage
+          # Stage the whole app but skip heavy/ephemeral stuff
+          rsync -a \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='vendor' \
+            --exclude='storage/framework/cache/*' \
+            --exclude='storage/logs/*' \
+            ./ _stage_app/
+
+          # Stage public files from the already staged app directory
+          rsync -a _stage_app/public/ _stage_pub/
 
       # Step 8: Create a compressed tarball of the application files.
       - name: Create app bundle
         run: |
-          rm -rf _app
-          mkdir -p _app
+          rm -rf _app && mkdir -p _app
           tar --warning=no-file-changed -C _stage_app -czf _app/app.tar.gz . || true
 
-      # Step 9: Create a compressed tarball of the entire public directory.
-      # This includes the built assets, index.php, .htaccess, etc.
+      # Step 9: Create a compressed tarball of the public files.
       - name: Create public bundle
         run: |
-          rm -rf _pub
-          mkdir -p _pub
-          # Copy everything from the project's public/ directory (including the 'build' assets).
-          rsync -a --delete public/ _pub/
-          # Create the public tarball.
-          # The warning flag prevents the "file changed as we read it" error,
-          # and '|| true' keeps the job green if the warning still appears.
-          tar --warning=no-file-changed -C _pub -czf _pub/public.tar.gz . || true
+          rm -rf _pub && mkdir -p _pub
+          tar --warning=no-file-changed -C _stage_pub -czf _pub/public.tar.gz . || true
 
       # Step 10: Upload the application and public bundles to the server.
       - name: Upload bundles to server
