@@ -30,7 +30,7 @@ class AdminPanelProvider extends PanelProvider
             // Built-in auth screen
             ->login()
 
-            // ⚠️ Keep this as a method ON the Panel chain (note the leading ->)
+            //  Keep this as a method ON the Panel chain (note the leading ->)
             ->auth(fn (? \App\Models\User $user) => true)
 
             ->colors([
