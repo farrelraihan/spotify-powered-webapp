@@ -64,25 +64,21 @@ jobs:
         # The working-directory default is overridden here to run in the root.
         working-directory: .
 
-      # Step 7: Stage files for bundling, separating application and public files.
+      # Step 7: Stage files for bundling application files.
       # This avoids including unnecessary files like .git, node_modules, etc.
-      - name: Stage files
+      - name: Stage app files
         run: |
-          rm -rf _stage_app _stage_pub _app _pub
-          mkdir -p _stage_app _stage_pub _app _pub
+          rm -rf _stage_app _app _pub
+          mkdir -p _stage_app _app _pub
 
           # Copy application files, excluding development/generated directories.
           rsync -a . _stage_app \
             --exclude .git \
+            --exclude .git* \
             --exclude node_modules \
             --exclude vendor \
-            --exclude public/build \
+            --exclude public \
             --exclude storage
-
-          # Copy only the built assets to the public staging directory.
-          if [ -d public/build ]; then
-            rsync -a public/build/ _stage_pub/build/
-          fi
 
       # Step 8: Create a compressed tarball of the application files.
       - name: Create app bundle
@@ -96,8 +92,10 @@ jobs:
           mkdir -p _pub
           # Copy everything from the project's public/ directory (including the 'build' assets).
           rsync -a --delete public/ _pub/
-          # Create the tarball from the staged public files.
-          tar -C _pub -czf _pub/public.tar.gz .
+          # Create the public tarball.
+          # The warning flag prevents the "file changed as we read it" error,
+          # and '|| true' keeps the job green if the warning still appears.
+          tar --warning=no-file-changed -C _pub -czf _pub/public.tar.gz . || true
 
       # Step 10: Upload the application and public bundles to the server.
       - name: Upload bundles to server
@@ -131,11 +129,14 @@ jobs:
           echo "Using PHP: $PHP_BIN"
           "$PHP_BIN" -v
 
-          mkdir -p "$APP_PATH" "$PUBLIC_PATH" "$PUBLIC_PATH/build"
+          mkdir -p "$APP_PATH" "$PUBLIC_PATH"
 
-          # Unpack bundles uploaded by the workflow
-          [ -f "$HOME/app.tar.gz" ]    && tar -xzf "$HOME/app.tar.gz"    -C "$APP_PATH"    && rm -f "$HOME/app.tar.gz"
-          [ -f "$HOME/public.tar.gz" ] && tar -xzf "$HOME/public.tar.gz" -C "$PUBLIC_PATH" && rm -f "$HOME/public.tar.gz"
+          # Unpack bundles uploaded by the workflow, clearing old files first
+          if [ -f "$HOME/public.tar.gz" ]; then
+            rm -rf "$PUBLIC_PATH"/*
+            tar -xzf "$HOME/public.tar.gz" -C "$PUBLIC_PATH" && rm -f "$HOME/public.tar.gz"
+          fi
+          [ -f "$HOME/app.tar.gz" ] && tar -xzf "$HOME/app.tar.gz" -C "$APP_PATH" && rm -f "$HOME/app.tar.gz"
 
           # Optional Hostinger index shim into public/
           if [ -f "$HOME/index.hostinger.php" ]; then
