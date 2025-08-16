@@ -26,7 +26,7 @@ class AdminPanelProvider extends PanelProvider
             ->default()
             ->id('admin')
             ->path('admin')
-            ->login()
+
 
             //  allow every authenticated user to access Filament
             ->auth(fn ($user) => true)
@@ -57,6 +57,8 @@ class AdminPanelProvider extends PanelProvider
             ])
             ->authMiddleware([
                 Authenticate::class, // requires login only
-            ]);
+            ])
+            ->login()
+            ;
     }
 }
