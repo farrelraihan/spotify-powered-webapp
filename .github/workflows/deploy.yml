@@ -88,15 +88,16 @@ jobs:
       - name: Create app bundle
         run: tar -C _stage_app -czf _app/app.tar.gz .
 
-      # Step 9: Create a compressed tarball of the public assets.
-      # If no assets were built, an empty tarball is created.
+      # Step 9: Create a compressed tarball of the entire public directory.
+      # This includes the built assets, index.php, .htaccess, etc.
       - name: Create public bundle
         run: |
-          if [ -d _stage_pub/build ]; then
-            tar -C _stage_pub -czf _pub/public.tar.gz build
-          else
-            tar -czf _pub/public.tar.gz --files-from /dev/null
-          fi
+          rm -rf _pub
+          mkdir -p _pub
+          # Copy everything from the project's public/ directory (including the 'build' assets).
+          rsync -a --delete public/ _pub/
+          # Create the tarball from the staged public files.
+          tar -C _pub -czf _pub/public.tar.gz .
 
       # Step 10: Upload the application and public bundles to the server.
       - name: Upload bundles to server
