@@ -27,13 +27,16 @@ class AdminPanelProvider extends PanelProvider
             ->id('admin')
             ->path('admin')
 
+            // Built-in auth screen
+            ->login()
 
-            //  allow every authenticated user to access Filament
-            ->auth(fn ($user) => true)
+            // ⚠️ Keep this as a method ON the Panel chain (note the leading ->)
+            ->auth(fn (? \App\Models\User $user) => true)
 
             ->colors([
                 'primary' => Color::Amber,
             ])
+
             ->discoverResources(in: app_path('Filament/Resources'), for: 'App\\Filament\\Resources')
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\\Filament\\Pages')
             ->pages([
@@ -56,9 +59,7 @@ class AdminPanelProvider extends PanelProvider
                 DispatchServingFilamentEvent::class,
             ])
             ->authMiddleware([
-                Authenticate::class, // requires login only
-            ])
-            ->login()
-            ;
+                Authenticate::class,
+            ]);
     }
 }
