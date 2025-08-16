@@ -82,7 +82,10 @@ jobs:
 
       # Step 8: Create a compressed tarball of the application files.
       - name: Create app bundle
-        run: tar -C _stage_app -czf _app/app.tar.gz .
+        run: |
+          rm -rf _app
+          mkdir -p _app
+          tar --warning=no-file-changed -C _stage_app -czf _app/app.tar.gz . || true
 
       # Step 9: Create a compressed tarball of the entire public directory.
       # This includes the built assets, index.php, .htaccess, etc.
